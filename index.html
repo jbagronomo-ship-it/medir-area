@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<title>Medir Área</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#b71c1c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Medir Área">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--red:#b71c1c;--bg:#fff;--fg:#222}
+*{box-sizing:border-box}html,body{margin:0;height:100%;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+#map{position:absolute;inset:0}
+#panel{position:absolute;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:1000;background:#fffffff0;border-radius:12px;padding:10px 12px;box-shadow:0 2px 10px #0004}
+#panel h1{margin:0 0 6px;font-size:16px;color:var(--red)}
+.vals{display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:14px}
+.vals b{font-size:18px;color:var(--red)}
+#bar{position:absolute;left:8px;right:8px;bottom:calc(16px + env(safe-area-inset-bottom));z-index:1000;display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+button,select{border:0;border-radius:10px;padding:10px 12px;font-size:14px;background:var(--red);color:#fff;box-shadow:0 2px 6px #0004}
+button.alt{background:#fff;color:var(--red)}button.on{background:#2e7d32}
+select{background:#fff;color:#222}
+#list{position:absolute;inset:60px 8px 80px;z-index:1001;background:#fff;border-radius:12px;padding:12px;overflow:auto;display:none;box-shadow:0 2px 10px #0006}
+#list .it{border-bottom:1px solid #ddd;padding:8px 0;display:flex;justify-content:space-between;align-items:center;gap:6px}
+#list button{padding:6px 8px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1>📐 Medir Área — toque no mapa para marcar pontos</h1>
+  <div class="vals">
+    <div>Área: <b id="area">0</b></div>
+    <div>Perímetro: <b id="per">0 m</b></div>
+    <div>Pontos: <span id="np">0</span></div>
+    <div><select id="unit">
+      <option value="ha">hectares</option><option value="m2">m²</option>
+      <option value="alq">alqueire paulista (2,42 ha)</option>
+      <option value="alqm">alqueire mineiro (4,84 ha)</option>
+      <option value="km2">km²</option><option value="ac">acres</option>
+    </select></div>
+  </div>
+</div>
+<div id="bar">
+  <button id="undo" class="alt">↶ Desfazer</button>
+  <button id="clear" class="alt">🗑 Limpar</button>
+  <button id="gps">📍 Caminhar (GPS)</button>
+  <button id="loc" class="alt">🎯 Onde estou</button>
+  <button id="save">💾 Salvar</button>
+  <button id="open" class="alt">📂 Áreas</button>
+  <button id="kml" class="alt">⬇ KML</button>
+  <button id="imp" class="alt">⬆ Importar KML</button>
+  <input id="file" type="file" accept=".kml,application/vnd.google-earth.kml+xml,text/xml" hidden>
+</div>
+<div id="list"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map('map',{zoomControl:false}).setView([-15.78,-47.93],5);
+const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Esri'}).addTo(map);
+const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'OSM'});
+L.control.layers({'Satélite':sat,'Mapa':osm},null,{position:'bottomright'}).addTo(map);
+
+let pts=[], markers=[], poly=L.polygon([],{color:'#ffeb3b',weight:3,fillColor:'#e53935',fillOpacity:.35}).addTo(map), watch=null;
+const $=id=>document.getElementById(id);
+
+// área geodésica (fórmula esférica, mesma do Google/Leaflet.draw)
+function geoArea(ll){ if(ll.length<3) return 0; const R=6378137,d=Math.PI/180; let a=0;
+  for(let i=0;i<ll.length;i++){const p1=ll[i],p2=ll[(i+1)%ll.length];
+    a+=(p2.lng-p1.lng)*d*(2+Math.sin(p1.lat*d)+Math.sin(p2.lat*d));}
+  return Math.abs(a*R*R/2);}
+function perim(ll){let s=0;for(let i=0;i<ll.length;i++){if(ll.length<2)break;if(i==ll.length-1&&ll.length<3)break;s+=map.distance(ll[i],ll[(i+1)%ll.length]);}return s;}
+const conv={ha:[1e4,'ha'],m2:[1,'m²'],alq:[24200,'alq'],alqm:[48400,'alq MG'],km2:[1e6,'km²'],ac:[4046.856,'ac']};
+const fmt=n=>n.toLocaleString('pt-BR',{maximumFractionDigits:2});
+
+function redraw(){
+  poly.setLatLngs(pts);
+  const a=geoArea(pts),u=conv[$('unit').value];
+  $('area').textContent=fmt(a/u[0])+' '+u[1];
+  const p=perim(pts); $('per').textContent=p>1000?fmt(p/1000)+' km':fmt(p)+' m';
+  $('np').textContent=pts.length;
+}
+function addPt(ll){
+  pts.push(ll);
+  const m=L.marker(ll,{draggable:true,icon:L.divIcon({className:'',html:'<div style="width:16px;height:16px;border-radius:50%;background:#fff;border:3px solid #b71c1c"></div>',iconSize:[16,16],iconAnchor:[8,8]})}).addTo(map);
+  m.on('drag',e=>{pts[markers.indexOf(m)]=e.target.getLatLng();redraw();});
+  markers.push(m); redraw();
+}
+function clearAll(){markers.forEach(m=>map.removeLayer(m));markers=[];pts=[];redraw();}
+
+map.on('click',e=>{ if(!watch) addPt(e.latlng); });
+$('undo').onclick=()=>{if(!pts.length)return;pts.pop();map.removeLayer(markers.pop());redraw();};
+$('clear').onclick=()=>{if(confirm('Limpar todos os pontos?'))clearAll();};
+$('unit').onchange=redraw;
+$('loc').onclick=()=>navigator.geolocation.getCurrentPosition(p=>map.setView([p.coords.latitude,p.coords.longitude],18),e=>alert('GPS: '+e.message),{enableHighAccuracy:true});
+
+// modo caminhada: adiciona ponto a cada 3 m andados
+$('gps').onclick=()=>{
+  if(watch){navigator.geolocation.clearWatch(watch);watch=null;$('gps').classList.remove('on');$('gps').textContent='📍 Caminhar (GPS)';return;}
+  watch=navigator.geolocation.watchPosition(p=>{
+    if(p.coords.accuracy>20) return;
+    const ll=L.latLng(p.coords.latitude,p.coords.longitude);
+    if(!pts.length||map.distance(pts[pts.length-1],ll)>=3){addPt(ll);map.panTo(ll);}
+  },e=>alert('GPS: '+e.message),{enableHighAccuracy:true,maximumAge:0});
+  $('gps').classList.add('on');$('gps').textContent='⏹ Parar GPS';
+};
+
+// salvar/abrir (localStorage)
+const load=()=>{try{return JSON.parse(localStorage.getItem('areas')||'[]')}catch{return[]}};
+const store=a=>{try{localStorage.setItem('areas',JSON.stringify(a))}catch{alert('Não foi possível salvar')}};
+$('save').onclick=()=>{ if(pts.length<3)return alert('Marque pelo menos 3 pontos');
+  const nome=prompt('Nome da área:','Talhão '+(load().length+1)); if(!nome)return;
+  const a=load(); a.push({nome,pts:pts.map(p=>[p.lat,p.lng]),area:geoArea(pts),data:new Date().toLocaleDateString('pt-BR')}); store(a); alert('Salvo!');};
+$('open').onclick=()=>{const l=$('list'); if(l.style.display==='block'){l.style.display='none';return;}
+  const a=load(); l.innerHTML='<b>Áreas salvas</b>'+(a.length?'':'<p>Nenhuma ainda.</p>');
+  a.forEach((x,i)=>{const d=document.createElement('div');d.className='it';
+    d.innerHTML=`<span>${x.nome.replace(/</g,'&lt;')}<br><small>${fmt(x.area/1e4)} ha · ${x.data}</small></span><span><button data-o>Abrir</button> <button class="alt" data-d>✕</button></span>`;
+    d.querySelector('[data-o]').onclick=()=>{clearAll();x.pts.forEach(p=>addPt(L.latLng(p[0],p[1])));map.fitBounds(poly.getBounds());l.style.display='none';};
+    d.querySelector('[data-d]').onclick=()=>{if(confirm('Excluir '+x.nome+'?')){a.splice(i,1);store(a);l.style.display='none';$('open').click();}};
+    l.appendChild(d);});
+  l.style.display='block';};
+
+// exportar KML (abre no Google Earth, QGIS, etc.)
+$('kml').onclick=()=>{ if(pts.length<3)return alert('Marque pelo menos 3 pontos');
+  const c=[...pts,pts[0]].map(p=>`${p.lng},${p.lat},0`).join(' ');
+  const kml=`<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><name>Área ${fmt(geoArea(pts)/1e4)} ha</name><Polygon><outerBoundaryIs><LinearRing><coordinates>${c}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark></kml>`;
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([kml],{type:'application/vnd.google-earth.kml+xml'}));a.download='area.kml';a.click();};
+// importar KML: lê o primeiro polígono (ou linha) do arquivo
+$('imp').onclick=()=>$('file').click();
+$('file').onchange=e=>{const f=e.target.files[0];if(!f)return;f.text().then(t=>{
+  const doc=new DOMParser().parseFromString(t,'text/xml');
+  const el=doc.querySelector('Polygon coordinates')||doc.querySelector('LineString coordinates')||doc.querySelector('coordinates');
+  if(!el)return alert('Nenhum polígono encontrado no KML');
+  let c=el.textContent.trim().split(/\s+/).map(s=>s.split(',').map(Number)).filter(v=>v.length>=2&&!isNaN(v[0])&&!isNaN(v[1]));
+  if(c.length>1&&c[0][0]===c[c.length-1][0]&&c[0][1]===c[c.length-1][1])c.pop();
+  if(c.length<3)return alert('Polígono inválido');
+  clearAll();c.forEach(v=>addPt(L.latLng(v[1],v[0])));map.fitBounds(poly.getBounds());
+});e.target.value='';};
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
